@@ -36,6 +36,8 @@
 ..\..\main.o: D:\Keil\ARM\ARMCC\Bin\..\include\stdlib.h
 ..\..\main.o: ..\..\User\products.h
 ..\..\main.o: D:\Keil\ARM\ARMCC\Bin\..\include\stdbool.h
+..\..\main.o: ..\..\User\./beep/bsp_beep.h
+..\..\main.o: ..\..\User\./led/bsp_led.h
 ..\..\main.o: ..\..\User\delay.h
 ..\..\main.o: ..\..\User\sg90.h
 ..\..\main.o: ..\..\User\DS18B20\ds18b20.h

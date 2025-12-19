@@ -11,6 +11,9 @@ int main(void)
     Setup_USART_Interrupt(); // 额外开启 RXNE 中断用于 Protocol 接收
     Screen_Shopping_System_Init();
     delay_init();
+    Key_GPIO_Config();
+    BEEP_GPIO_Config(); // 初始化蜂鸣器 GPIO
+    LED_GPIO_Config();
 
     // 2. 中间件与协议初始化
     // ---------------------------------------------------------
@@ -19,8 +22,13 @@ int main(void)
     Product_Debug_Dump_All();
     Setup_TIM2_Interrupt(); // 初始化 TIM2 定时器 (0.5s 周期中断)
 
-    DHT11_Init(); // 初始化 DHT11 湿度传感器
-    printf("[System] DHT11_Init Complete.\r\n");
+    BEEP(OFF);
+    LED_RED(OFF);
+
+    while (DHT11_Init())
+    {
+        printf("[System] DHT11_Init ing...\r\n");
+    } // 初始化 DHT11 湿度传感器
     delay_ms(50); // 等待传感器稳定
 
     DS18B20_Init();
@@ -30,50 +38,66 @@ int main(void)
     // ---------------------------------------------------------
     while (1)
     {
-        if (sensor_data.temper > MAX_TEMPER || sensor_data.humidity > MAX_HUMIDITY)
+        if (sensor_data.temper > MAX_TEMPER || (sensor_data.humidity > MAX_HUMIDITY && sensor_data.humidity < 100))
         {
             // 进入紧急状态
             Shop_transtate(SHOP_STATE_EMMERGENCY);
             Slave_transtate(SYS_STATE_IDLE); // 从机状态回到空闲
             printf("[Emergency] Temperature or Humidity Exceeded Limits! Temp: %.2f, Humidity: %d%%\r\n", sensor_data.temper, sensor_data.humidity);
-        } else if(ShoppingState == SHOP_STATE_EMMERGENCY){
+        }
+        else if (ShoppingState == SHOP_STATE_EMMERGENCY)
+        {
             // 恢复正常状态
+            BEEP(OFF);
+            LED_RED(OFF);
             Shop_transtate(SHOP_STATE_IDLE);
             Slave_transtate(SYS_STATE_IDLE); // 从机状态回到空闲
-            control_Servo_Door(0); // 关闭舵机门
+            control_Servo_Door(0);           // 关闭舵机门
             printf("[Recovery] Temperature and Humidity Back to Normal. Temp: %.2f, Humidity: %d%%\r\n", sensor_data.temper, sensor_data.humidity);
         }
-        callSyncChecker();
+
+        // 进入上位机服务函数，检查环形队列是否有更新
+        callSyncHandler();
+
         switch (ShoppingState)
         {
         case SHOP_STATE_IDLE:
             // 空闲状态，等待扫码
-            if(Screen_Check_Start_Shopping_Msg){
-                Shop_transtate(SHOP_STATE_SCANNING);
+            clear_shopping_car();
+            if (Screen_Check_Start_Shopping_Msg())
+            {
+                printf("[Shop] Shopping Started.\r\n");
                 control_Servo_Door(1);
                 delay_ms(800); // 等待舵机动作完成
                 control_Servo_Door(0);
+
+                Shop_transtate(SHOP_STATE_SCANNING);
             }
 
             break;
         case SHOP_STATE_SCANNING:
-            // 扫码中，收集扫码数据，用于更新上位机和串口屏
-            break;
-        case SHOP_STATE_UPDATING_HMI:
-            // 更新串口屏显示
-            break;
-        case SHOP_STATE_UPDATING_MASTER:
-            // 更新上位机数据同步
+            refresh_MCU_products_list();
+            Screen_Update_HMI_Shopping_List();
+            Screen_Calculate_And_Send_Total();
+
+            if (Screen_Wait_For_PayOff_Msg())
+                Shop_transtate(SHOP_STATE_WAITING_PAYOFF);
             break;
         case SHOP_STATE_WAITING_PAYOFF:
-            // 等待结算指令，这里计时等待，超过一定时间（和串口屏约定好），回到SHOP_STATE_SCANNING
-            break;
-        case SHOP_STATE_PROCESSING_PAYOFF:
-            // 处理结算，计算总价并串口屏显示，上传给上位机
+            // 扫按钮，等了很久还没有付款就返回SHOP_STATE_SCANNING
+            if (Key_Scan(KEY2_GPIO_PORT, KEY2_GPIO_PIN) == KEY_ON)
+            {
+                printf("[Shop] Payment Confirmed. Switching to IDLE state.\r\n");
+                printf("CMD:PAY_OFF,TOTAL:%d\n", total_products2paid);
+                control_Servo_Door(1);
+                delay_ms(800); // 等待舵机动作完成
+                control_Servo_Door(0);
+                Shop_transtate(SHOP_STATE_IDLE);
+            }
             break;
         case SHOP_STATE_EMMERGENCY:
             // 紧急状态，闪灯，响蜂鸣器
-            
+            callEmergencyHandler();
             break;
         case SHOP_STATE_SYNCING:
             // 数据同步中，暂停模块通信
@@ -84,9 +108,9 @@ int main(void)
     }
 }
 
-void callSyncChecker(void)
+// 调用数据同步所用的从机状态机
+void callSyncHandler(void)
 {
-    // 从机状态机，优先级高于购物状态机
     // 尝试从协议缓冲区解析一条完整指令 (非阻塞)
     if (Protocol_Parse_Line(&rx_packet))
     {
@@ -204,7 +228,6 @@ void callSyncChecker(void)
                            result_item.id, result_item.price, result_item.name);
                     // 同时添加到购物车
                     add_product_to_shopping_car(result_item.id);
-                    refresh_MCU_products_list();
                 }
                 else
                 {
@@ -229,13 +252,21 @@ void callSyncChecker(void)
     // Toggle_LED();
 }
 
+void callEmergencyHandler(void)
+{
+    // 亮红灯，响蜂鸣器，开门，通知上位机
+    LED_RED(ON);
+    BEEP(ON);
+    control_Servo_Door(1);
+}
+
 /**
  * @brief  配置 TIM2 定时器中断，0.5s 触发一次
  * @note   系统时钟 72MHz，APB1 时钟 36MHz，TIM2 在 APB1 上
  *         APB1 预分频系数不为 1 时，TIM 时钟 = APB1 × 2 = 72MHz
  *         目标：0.5s = 500ms
- *         配置：PSC = 7199, ARR = 4999
- *         计算：72MHz / (7199+1) / (4999+1) = 72MHz / 7200 / 5000 = 2Hz = 0.5s
+ *         配置：PSC = 7199, ARR = 9999
+ *         计算：72MHz / (7199+1) / (9999+1) = 72MHz / 7200 / 10000 = 1Hz = 1s
  */
 void Setup_TIM2_Interrupt(void)
 {
@@ -246,7 +277,7 @@ void Setup_TIM2_Interrupt(void)
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
 
     // 2. 配置定时器基本参数
-    TIM_InitStruct.TIM_Period = 4999;    // 自动重装载值 ARR = 4999 (计数 5000 次)
+    TIM_InitStruct.TIM_Period = 9999;    // 自动重装载值 ARR = 9999 (计数 10000 次)
     TIM_InitStruct.TIM_Prescaler = 7199; // 预分频器 PSC = 7199 (72MHz / 7200 = 10KHz)
     TIM_InitStruct.TIM_ClockDivision = TIM_CKD_DIV1;
     TIM_InitStruct.TIM_CounterMode = TIM_CounterMode_Up; // 向上计数
@@ -300,26 +331,32 @@ void TIM2_IRQHandler(void)
         // 清除中断标志位
         TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
 
+        // 如果当前处于数据同步状态，则跳过传感器更新
         if (ShoppingState == SHOP_STATE_SYNCING)
+        {
+            printf("[TIM2] Syncing in progress, skipping sensor update.\r\n");
             return;
+        }
 
-        printf("[TIM2] Interrupt Triggered.\r\n");
+        // printf("[TIM2] Interrupt Triggered.\r\n");
         // 更新温湿度数据
         sensor_data.temper = DS18B20_GetTemperture();
         sensor_data.humidity = DHT11_GetHumidity();
-        // ===== 在此添加周期性任务 =====
-        // 示例：LED 翻转、温湿度采集、数据更新等
 
-        // TODO: 添加您的 0.5s 周期任务代码
+        printf("[Sensor] Temperature: %.2f C, Humidity: %d %%\r\n", sensor_data.temper, sensor_data.humidity);
     }
 }
 
-void control_Servo_Door(int open){
+void control_Servo_Door(int open)
+{
     // 控制舵机开门的函数实现
-    if(open){
+    if (open)
+    {
         // 打开舵机门
         printf("Servo Door Opened.\r\n");
-    }else{
+    }
+    else
+    {
         // 关闭舵机门
         printf("Servo Door Closed.\r\n");
     }

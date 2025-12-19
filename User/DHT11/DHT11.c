@@ -43,7 +43,7 @@ u8 DHT11_Check(void){
         retry++;
         delay_us(1);
     }
-    if(retry>=100)return 1;	    
+    if(retry>=100)return 1;	  // 失败  
     return 0;
 }
 

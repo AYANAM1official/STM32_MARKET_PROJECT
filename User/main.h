@@ -1,31 +1,32 @@
 #include "stm32f10x.h"
 #include "bsp_usart_dma.h"
-#include "protocol.h"
-#include "products.h"
+#include "protocol.h" // 环形缓冲区协议
+#include "products.h" // 商品信息管理模块
 #include "stdbool.h"
+#include "./beep/bsp_beep.h" // 引用蜂鸣器模块
+#include "./led/bsp_led.h"   // 引用LED模块
 
 #include "delay.h" // 引用延时模块
 #include "sg90.h"  // 引用舵机模块
 #include "ds18b20.h"         //温度
 #include "./screen/screen.h" //串口屏
-#include "./DHT11/DHT11.h"   //DHT11温湿度（温度数据刷新慢且精度略低，我们这里只使用湿度数据）
+#include "./DHT11/DHT11.h"   //DHT11温湿度（刷新慢且精度略低，我们这里只使用湿度数据）k
+#include "./Key/bsp_key.h" //按键模块
 
 //================全程都在同时扫描环形缓冲区和处理状态机======================
 void TIM2_IRQHandler(void);
-void callSyncChecker(void);
+void callSyncHandler(void);
 void Setup_USART_Interrupt(void);
 void Setup_TIM2_Interrupt(void);
 void control_Servo_Door(int open);
+void callEmergencyHandler(void);
 // ==========================================
 //商店全局状态
 // ==========================================
 typedef enum {
     SHOP_STATE_IDLE = 0,        // 空闲状态，等待扫码
     SHOP_STATE_SCANNING,        // 扫码中，收集扫码数据，用于更新上位机和串口屏
-    SHOP_STATE_UPDATING_HMI,    // 更新串口屏显示
-    SHOP_STATE_UPDATING_MASTER, // 更新上位机数据同步
     SHOP_STATE_WAITING_PAYOFF,  // 等待结算指令，这里计时等待，超过一定时间（和串口屏约定好），回到SHOP_STATE_SCANNING
-    SHOP_STATE_PROCESSING_PAYOFF, // 处理结算，计算总价并串口屏显示，上传给上位机
     SHOP_STATE_EMMERGENCY,   // 紧急状态，打开舵机门，闪灯，响蜂鸣器
     SHOP_STATE_SYNCING        // 数据同步中，暂停模块通信
 } ShoppingState_t;
