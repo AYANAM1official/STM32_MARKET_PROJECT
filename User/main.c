@@ -1,6 +1,235 @@
 #include "main.h"
 
 /**
+ * @brief  主函数中包含和串口有关的，切换状态机的高优先级任务，数据的更新在TIM中断中完成
+ */
+int main(void)
+{
+    // 1. 系统底层初始化
+    // ---------------------------------------------------------
+    USART_Config();          // 初始化串口 (bsp_usart_dma.c)
+    Setup_USART_Interrupt(); // 额外开启 RXNE 中断用于 Protocol 接收
+    Screen_Shopping_System_Init();
+    delay_init();
+
+    // 2. 中间件与协议初始化
+    // ---------------------------------------------------------
+    Protocol_Init();        // 初始化协议环形缓冲区
+    Product_Manager_Init(); // 初始化商品管理器 (读取元数据，恢复总数)
+    Product_Debug_Dump_All();
+    Setup_TIM2_Interrupt(); // 初始化 TIM2 定时器 (0.5s 周期中断)
+
+    DHT11_Init(); // 初始化 DHT11 湿度传感器
+    printf("[System] DHT11_Init Complete.\r\n");
+    delay_ms(50); // 等待传感器稳定
+
+    DS18B20_Init();
+    printf("[System] DS18B20_Init Complete.\r\n");
+    delay_ms(50);
+    // 3. 主循环 (无限状态机)
+    // ---------------------------------------------------------
+    while (1)
+    {
+        if (sensor_data.temper > MAX_TEMPER || sensor_data.humidity > MAX_HUMIDITY)
+        {
+            // 进入紧急状态
+            Shop_transtate(SHOP_STATE_EMMERGENCY);
+            Slave_transtate(SYS_STATE_IDLE); // 从机状态回到空闲
+            printf("[Emergency] Temperature or Humidity Exceeded Limits! Temp: %.2f, Humidity: %d%%\r\n", sensor_data.temper, sensor_data.humidity);
+        } else if(ShoppingState == SHOP_STATE_EMMERGENCY){
+            // 恢复正常状态
+            Shop_transtate(SHOP_STATE_IDLE);
+            Slave_transtate(SYS_STATE_IDLE); // 从机状态回到空闲
+            control_Servo_Door(0); // 关闭舵机门
+            printf("[Recovery] Temperature and Humidity Back to Normal. Temp: %.2f, Humidity: %d%%\r\n", sensor_data.temper, sensor_data.humidity);
+        }
+        callSyncChecker();
+        switch (ShoppingState)
+        {
+        case SHOP_STATE_IDLE:
+            // 空闲状态，等待扫码
+            if(Screen_Check_Start_Shopping_Msg){
+                Shop_transtate(SHOP_STATE_SCANNING);
+                control_Servo_Door(1);
+                delay_ms(800); // 等待舵机动作完成
+                control_Servo_Door(0);
+            }
+
+            break;
+        case SHOP_STATE_SCANNING:
+            // 扫码中，收集扫码数据，用于更新上位机和串口屏
+            break;
+        case SHOP_STATE_UPDATING_HMI:
+            // 更新串口屏显示
+            break;
+        case SHOP_STATE_UPDATING_MASTER:
+            // 更新上位机数据同步
+            break;
+        case SHOP_STATE_WAITING_PAYOFF:
+            // 等待结算指令，这里计时等待，超过一定时间（和串口屏约定好），回到SHOP_STATE_SCANNING
+            break;
+        case SHOP_STATE_PROCESSING_PAYOFF:
+            // 处理结算，计算总价并串口屏显示，上传给上位机
+            break;
+        case SHOP_STATE_EMMERGENCY:
+            // 紧急状态，闪灯，响蜂鸣器
+            
+            break;
+        case SHOP_STATE_SYNCING:
+            // 数据同步中，暂停模块通信
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+void callSyncChecker(void)
+{
+    // 从机状态机，优先级高于购物状态机
+    // 尝试从协议缓冲区解析一条完整指令 (非阻塞)
+    if (Protocol_Parse_Line(&rx_packet))
+    {
+
+        // 状态机根据当前状态和接收到的事件进行处理
+        switch (rx_packet.event)
+        {
+        // ---------------------------------------------------------
+        // 场景 A: 收到同步启动指令 (PC -> STM32)
+        // 指令: CMD:SYNC_START,TOTAL:100
+        // ---------------------------------------------------------
+        case EVENT_SYNC_START:
+            // 只有在空闲状态下才允许开始同步
+            if (SlaveState == SYS_STATE_IDLE)
+            {
+                // =进入同步流程，屏蔽模块通信=
+                Shop_transtate(SHOP_STATE_SYNCING);
+
+                sync_expect_total = rx_packet.total_count;
+                printf("<< SYNC_START >> Expecting %d items.\r\n", sync_expect_total);
+
+                // [状态切换] 进入同步启动状态
+                Slave_transtate(SYS_STATE_SYNC_START);
+
+                // [核心操作] 格式化数据库 (耗时操作：擦除 Flash 扇区)
+                // 注意：PC 端发送 START 后会进入等待，所以这里阻塞是安全的
+                Product_Clear_Database();
+
+                // [握手信号] 发送 REQ_SYNC 告诉 PC: "擦除完毕，请发送数据"
+                // 对应文档中的 "阶段二：握手成功"
+                printf("CMD:REQ_SYNC\n");
+
+                // [状态切换] 进入接收数据状态
+                Slave_transtate(SYS_STATE_SYNC_ING);
+                sync_received_cnt = 0;
+            }
+            else
+            {
+                printf("CMD:ALARM,MSG:Busy_Syncing\n");
+            }
+            break;
+
+        // ---------------------------------------------------------
+        // 场景 B: 收到商品数据 (PC -> STM32)
+        // 指令: CMD:SYNC_DATA,ID:...,PR:...,NM:...
+        // ---------------------------------------------------------
+        case EVENT_SYNC_DATA:
+            if (SlaveState == SYS_STATE_SYNC_ING)
+            {
+                // [核心操作] 写入 Flash
+                // 使用 sync_received_cnt 作为存储索引 (Index)
+                Product_Write_Item(sync_received_cnt,
+                                   rx_packet.id,
+                                   rx_packet.price,
+                                   rx_packet.name);
+
+                sync_received_cnt++;
+
+                // 可选：每接收 50 条打印一次进度日志 (避免串口刷屏)
+                if (sync_received_cnt % 50 == 0)
+                {
+                    printf("[Log] Sync Progress: %d/%d\r\n", sync_received_cnt, sync_expect_total);
+                }
+            }
+            break;
+
+        // ---------------------------------------------------------
+        // 场景 C: 收到同步结束指令 (PC -> STM32)
+        // 指令: CMD:SYNC_END,SUM:100
+        // ---------------------------------------------------------
+        case EVENT_SYNC_END:
+            if (SlaveState == SYS_STATE_SYNC_ING)
+            {
+                printf("<< SYNC_END >> Recv: %d, PC_Sum: %d\r\n", sync_received_cnt, rx_packet.total_count);
+
+                // [校验] 检查接收数量是否与 PC 发送数量一致
+                if (sync_received_cnt == rx_packet.total_count)
+                {
+                    // 校验通过：更新 Flash 中的元数据 (Total Count)
+                    Product_Update_Metadata(sync_received_cnt);
+                    printf("[Success] Database Updated Successfully.\r\n");
+
+                    // 蜂鸣器提示可以加在这里...
+                }
+                else
+                {
+                    // 校验失败
+                    printf("[Error] Data Count Mismatch!\r\n");
+                    printf("CMD:ALARM,LEVEL:2,MSG:Sync_Mismatch_Error\n");
+                }
+
+                // [状态切换] 恢复空闲，允许扫码
+                Slave_transtate(SYS_STATE_IDLE);
+                // 回到原状态
+                Shop_transtate(last_ShoppingState);
+            }
+            break;
+
+        // ---------------------------------------------------------
+        // 场景 D: 模拟扫码 / 实际扫码 (PC/Scanner -> STM32)
+        // 指令: CMD:SCAN,ID:6912345
+        // ---------------------------------------------------------
+        case EVENT_SCAN:
+            if (SlaveState == SYS_STATE_IDLE)
+            {
+                Product_Item_t result_item;
+                // printf("[Scan] Searching ID: %d ...\r\n", rx_packet.id);
+
+                // [核心操作] 在 Flash 中查找 ID
+                if (Product_Find_By_ID(rx_packet.id, &result_item))
+                {
+                    // 找到商品 -> 上报销售信息
+                    // 格式: CMD:REPORT,ID:xxx,PR:xxx,NM:xxx
+                    printf("CMD:REPORT,ID:%d,PR:%.2f,NM:%s\n",
+                           result_item.id, result_item.price, result_item.name);
+                    // 同时添加到购物车
+                    add_product_to_shopping_car(result_item.id);
+                    refresh_MCU_products_list();
+                }
+                else
+                {
+                    // 未找到 -> 报警
+                    printf("CMD:ALARM,LEVEL:1,MSG:Item_Not_Found\n");
+                }
+            }
+            else
+            {
+                // 如果正在同步时扫码，提示系统忙
+                printf("CMD:ALARM,MSG:System_Busy\n");
+            }
+            break;
+        case EVENT_NONE:
+
+            break;
+        }
+    }
+
+    // 主循环空闲任务 (例如 LED 闪烁心跳)
+    // Delay(100);
+    // Toggle_LED();
+}
+
+/**
  * @brief  配置 TIM2 定时器中断，0.5s 触发一次
  * @note   系统时钟 72MHz，APB1 时钟 36MHz，TIM2 在 APB1 上
  *         APB1 预分频系数不为 1 时，TIM 时钟 = APB1 × 2 = 72MHz
@@ -17,8 +246,8 @@ void Setup_TIM2_Interrupt(void)
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
 
     // 2. 配置定时器基本参数
-    TIM_InitStruct.TIM_Period = 4999;              // 自动重装载值 ARR = 4999 (计数 5000 次)
-    TIM_InitStruct.TIM_Prescaler = 7199;           // 预分频器 PSC = 7199 (72MHz / 7200 = 10KHz)
+    TIM_InitStruct.TIM_Period = 4999;    // 自动重装载值 ARR = 4999 (计数 5000 次)
+    TIM_InitStruct.TIM_Prescaler = 7199; // 预分频器 PSC = 7199 (72MHz / 7200 = 10KHz)
     TIM_InitStruct.TIM_ClockDivision = TIM_CKD_DIV1;
     TIM_InitStruct.TIM_CounterMode = TIM_CounterMode_Up; // 向上计数
     TIM_TimeBaseInit(TIM2, &TIM_InitStruct);
@@ -61,188 +290,9 @@ void Setup_USART_Interrupt(void)
 }
 
 /**
- * @brief  主函数中包含和串口有关的，切换状态机的高优先级任务，数据的更新在TIM中断中完成
+ * @brief  TIM2 定时器中断服务函数 (0.5s 周期)
+ * @note   用于周期性任务，如数据更新、状态检查等
  */
-int main(void)
-{
-    // 1. 系统底层初始化
-    // ---------------------------------------------------------
-    USART_Config();          // 初始化串口 (bsp_usart_dma.c)
-    Setup_USART_Interrupt(); // 额外开启 RXNE 中断用于 Protocol 接收
-    Screen_Shopping_System_Init();
-    delay_init();
-
-    // 2. 中间件与协议初始化
-    // ---------------------------------------------------------
-    Protocol_Init();        // 初始化协议环形缓冲区
-    Product_Manager_Init(); // 初始化商品管理器 (读取元数据，恢复总数)
-    Product_Debug_Dump_All();
-    Setup_TIM2_Interrupt();  // 初始化 TIM2 定时器 (0.5s 周期中断)
-
-    DHT11_Init(); // 初始化 DHT11 湿度传感器
-    delay_ms(50); // 等待传感器稳定
-
-    DS18B20_Init();
-    delay_ms(50);
-    // 3. 主循环 (无限状态机)
-    // ---------------------------------------------------------
-    while (1)
-    {
-
-    //     if (temper < 0)
-    //     {
-    //         //printf("the temperture is ");
-    //     }
-    //     else
-    //     {
-    //         //printf("the temperture is ");
-    //     }
-    //    // printf("%.4f\r\n", temper);
-
-        // 从机状态机，优先级高于购物状态机
-        // 尝试从协议缓冲区解析一条完整指令 (非阻塞)
-        if (Protocol_Parse_Line(&rx_packet))
-        {
-            // 状态机根据当前状态和接收到的事件进行处理
-            switch (rx_packet.event)
-            {
-            // ---------------------------------------------------------
-            // 场景 A: 收到同步启动指令 (PC -> STM32)
-            // 指令: CMD:SYNC_START,TOTAL:100
-            // ---------------------------------------------------------
-            case EVENT_SYNC_START:
-                // 只有在空闲状态下才允许开始同步
-                if (SlaveState == SYS_STATE_IDLE)
-                {
-                    // =进入同步流程，屏蔽模块通信=
-                    Shop_transtate(SHOP_STATE_SYNCING);
-
-                    sync_expect_total = rx_packet.total_count;
-                    printf("<< SYNC_START >> Expecting %d items.\r\n", sync_expect_total);
-
-                    // [状态切换] 进入同步启动状态
-                    Slave_transtate(SYS_STATE_SYNC_START);
-
-                    // [核心操作] 格式化数据库 (耗时操作：擦除 Flash 扇区)
-                    // 注意：PC 端发送 START 后会进入等待，所以这里阻塞是安全的
-                    Product_Clear_Database();
-
-                    // [握手信号] 发送 REQ_SYNC 告诉 PC: "擦除完毕，请发送数据"
-                    // 对应文档中的 "阶段二：握手成功"
-                    printf("CMD:REQ_SYNC\n");
-
-                    // [状态切换] 进入接收数据状态
-                    Slave_transtate(SYS_STATE_SYNC_ING);
-                    sync_received_cnt = 0;
-                }
-                else
-                {
-                    printf("CMD:ALARM,MSG:Busy_Syncing\n");
-                }
-                break;
-
-            // ---------------------------------------------------------
-            // 场景 B: 收到商品数据 (PC -> STM32)
-            // 指令: CMD:SYNC_DATA,ID:...,PR:...,NM:...
-            // ---------------------------------------------------------
-            case EVENT_SYNC_DATA:
-                if (SlaveState == SYS_STATE_SYNC_ING)
-                {
-                    // [核心操作] 写入 Flash
-                    // 使用 sync_received_cnt 作为存储索引 (Index)
-                    Product_Write_Item(sync_received_cnt,
-                                       rx_packet.id,
-                                       rx_packet.price,
-                                       rx_packet.name);
-
-                    sync_received_cnt++;
-
-                    // 可选：每接收 50 条打印一次进度日志 (避免串口刷屏)
-                    if (sync_received_cnt % 50 == 0)
-                    {
-                        printf("[Log] Sync Progress: %d/%d\r\n", sync_received_cnt, sync_expect_total);
-                    }
-                }
-                break;
-
-            // ---------------------------------------------------------
-            // 场景 C: 收到同步结束指令 (PC -> STM32)
-            // 指令: CMD:SYNC_END,SUM:100
-            // ---------------------------------------------------------
-            case EVENT_SYNC_END:
-                if (SlaveState == SYS_STATE_SYNC_ING)
-                {
-                    printf("<< SYNC_END >> Recv: %d, PC_Sum: %d\r\n", sync_received_cnt, rx_packet.total_count);
-
-                    // [校验] 检查接收数量是否与 PC 发送数量一致
-                    if (sync_received_cnt == rx_packet.total_count)
-                    {
-                        // 校验通过：更新 Flash 中的元数据 (Total Count)
-                        Product_Update_Metadata(sync_received_cnt);
-                        printf("[Success] Database Updated Successfully.\r\n");
-
-                        // 蜂鸣器提示可以加在这里...
-                    }
-                    else
-                    {
-                        // 校验失败
-                        printf("[Error] Data Count Mismatch!\r\n");
-                        printf("CMD:ALARM,LEVEL:2,MSG:Sync_Mismatch_Error\n");
-                    }
-
-                    // [状态切换] 恢复空闲，允许扫码
-                    Slave_transtate(SYS_STATE_IDLE);
-                     // 回到原状态
-                    Shop_transtate(last_ShoppingState);
-                }
-                break;
-
-            // ---------------------------------------------------------
-            // 场景 D: 模拟扫码 / 实际扫码 (PC/Scanner -> STM32)
-            // 指令: CMD:SCAN,ID:6912345
-            // ---------------------------------------------------------
-            case EVENT_SCAN:
-                if (SlaveState == SYS_STATE_IDLE)
-                {
-                    Product_Item_t result_item;
-                    // printf("[Scan] Searching ID: %d ...\r\n", rx_packet.id);
-
-                    // [核心操作] 在 Flash 中查找 ID
-                    if (Product_Find_By_ID(rx_packet.id, &result_item))
-                    {
-                        // 找到商品 -> 上报销售信息
-                        // 格式: CMD:REPORT,ID:xxx,PR:xxx,NM:xxx
-                        printf("CMD:REPORT,ID:%d,PR:%.2f,NM:%s\n",
-                               result_item.id, result_item.price, result_item.name);
-                    }
-                    else
-                    {
-                        // 未找到 -> 报警
-                        printf("CMD:ALARM,LEVEL:1,MSG:Item_Not_Found\n");
-                    }
-                }
-                else
-                {
-                    // 如果正在同步时扫码，提示系统忙
-                    printf("CMD:ALARM,MSG:System_Busy\n");
-                }
-                break;
-            case EVENT_NONE:
-
-                break;
-            }
-        }
-
-        // 主循环空闲任务 (例如 LED 闪烁心跳)
-        // Delay(100);
-        // Toggle_LED();
-    }
-}
-
-/**
-  * @brief  TIM2 定时器中断服务函数 (0.5s 周期)
-  * @note   用于周期性任务，如数据更新、状态检查等
-  */
 void TIM2_IRQHandler(void)
 {
     if (TIM_GetITStatus(TIM2, TIM_IT_Update) != RESET)
@@ -250,16 +300,27 @@ void TIM2_IRQHandler(void)
         // 清除中断标志位
         TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
 
-        if(ShoppingState == SHOP_STATE_SYNCING) return;
-        
+        if (ShoppingState == SHOP_STATE_SYNCING)
+            return;
+
         printf("[TIM2] Interrupt Triggered.\r\n");
-         // 更新温湿度数据
-         sensor_data.temper = DS18B20_GetTemperture();
-         sensor_data.humidity = DHT11_GetHumidity();
+        // 更新温湿度数据
+        sensor_data.temper = DS18B20_GetTemperture();
+        sensor_data.humidity = DHT11_GetHumidity();
         // ===== 在此添加周期性任务 =====
         // 示例：LED 翻转、温湿度采集、数据更新等
-        
+
         // TODO: 添加您的 0.5s 周期任务代码
-        
+    }
+}
+
+void control_Servo_Door(int open){
+    // 控制舵机开门的函数实现
+    if(open){
+        // 打开舵机门
+        printf("Servo Door Opened.\r\n");
+    }else{
+        // 关闭舵机门
+        printf("Servo Door Closed.\r\n");
     }
 }

@@ -12,12 +12,15 @@
 
 //================全程都在同时扫描环形缓冲区和处理状态机======================
 void TIM2_IRQHandler(void);
+void callSyncChecker(void);
+void Setup_USART_Interrupt(void);
+void Setup_TIM2_Interrupt(void);
+void control_Servo_Door(int open);
 // ==========================================
 //商店全局状态
 // ==========================================
 typedef enum {
     SHOP_STATE_IDLE = 0,        // 空闲状态，等待扫码
-    SHOP_STATE_WORKING,         // 工作中，等待扫码等操作
     SHOP_STATE_SCANNING,        // 扫码中，收集扫码数据，用于更新上位机和串口屏
     SHOP_STATE_UPDATING_HMI,    // 更新串口屏显示
     SHOP_STATE_UPDATING_MASTER, // 更新上位机数据同步
