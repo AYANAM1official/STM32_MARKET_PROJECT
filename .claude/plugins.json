@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "lastUpdated": 1764606321609,
+  "plugins": [
+    {
+      "filename": "pdf-processing-pro",
+      "type": "skill",
+      "metadata": {
+        "sourcePath": "skills\\document-processing\\pdf-processing-pro",
+        "filename": "pdf-processing-pro",
+        "name": "PDF Processing Pro",
+        "description": "Production-ready PDF processing with forms, tables, OCR, validation, and batch operations. Use when working with complex PDF workflows in production environments, processing large volumes of PDFs, or requiring robust error handling and validation.",
+        "category": "skills",
+        "type": "skill",
+        "size": 47458,
+        "contentHash": "0e07e0c87b7189911b91f35da0b3aaad6678ff2b2781334bfc217a5432a3fe6f",
+        "installedAt": 1764606321608,
+        "updatedAt": 1764606321608
+      }
+    }
+  ]
+}
