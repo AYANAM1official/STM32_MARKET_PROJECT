@@ -33,6 +33,7 @@ typedef enum
 } ShoppingState_t;
 ShoppingState_t last_ShoppingState = SHOP_STATE_IDLE; // 上一个状态
 ShoppingState_t ShoppingState = SHOP_STATE_IDLE;      // 初始状态为空闲
+char** ShoppingState_name = (char *[]){"IDLE", "SCANNING", "WAITING_PAYOFF", "EMMERGENCY", "SYNCING"};
 void Shop_transtate(ShoppingState_t _ShoppingState)
 {
     last_ShoppingState = ShoppingState;
@@ -74,6 +75,7 @@ void Setup_USART_Interrupt(void);
 
 MCU_Product_t shopping_car[DATA_BUFFER_VOLUME];
 int total_products2paid = 0;
+float total_price = 0.0f; // 购物车商品总价（与购物车同步维护）
 void refresh_MCU_products_list(void);
 
 // 根据result_item添加商品到购物车，如果已存在则数量+1，否则添加新商品（需要从flash读取商品信息）
@@ -87,6 +89,7 @@ void add_product_to_shopping_car(Product_Item_t *result_item)
         if (shopping_car[i].product.id == result_item->id)
         {
             shopping_car[i].num += 1;
+            total_price += result_item->price;
             found = 1;
             break;
         }
@@ -103,12 +106,14 @@ void add_product_to_shopping_car(Product_Item_t *result_item)
         // 接下来从flash读取商品信息
         shopping_car[i].product = *result_item;
         shopping_car[i].num = 1;
+        total_price += result_item->price;
     }
 }
 
 void clear_shopping_car(void)
 {
     total_products2paid = 0;
+    total_price = 0.0f;
 }
 
 // 调试：打印购物车内容

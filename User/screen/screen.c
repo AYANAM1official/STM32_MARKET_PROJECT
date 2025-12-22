@@ -102,13 +102,13 @@ void Screen_Calculate_And_Send_Total(void)
     }
     
     // 发送总价，这里示例追加显示在 t3中，也可以改为 t3.txt="..."
-    TJCPrintf("t3.txt+=\"%.2f\"", totalPrice);
+    TJCPrintf("t3.txt=\"%.2f\"", totalPrice);
     
     // printf("Total Price Calculated: %.2f\r\n", totalPrice);
 }
 
 // 5. 监听 Pay Off (0x02) 消息
-// 功能：阻塞等待，直到收到 0x02。如果收到 0x03 则忽略并继续等待。
+// 功能：非阻塞等待，直到收到 0x02。如果收到 0x03 则忽略并继续等待。
 bool Screen_Wait_For_PayOff_Msg(void)
 {
     uint8_t data;

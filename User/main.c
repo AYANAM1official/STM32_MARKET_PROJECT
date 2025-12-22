@@ -42,24 +42,23 @@ int main(void)
     // ---------------------------------------------------------
     while (1)
     {
-        /**if (sensor_data.temper > MAX_TEMPER || (sensor_data.humidity > MAX_HUMIDITY && sensor_data.humidity < 100))
-        {
-            // 进入紧急状态
-            Shop_transtate(SHOP_STATE_EMMERGENCY);
-            Slave_transtate(SYS_STATE_IDLE); // 从机状态回到空闲
-            printf("[Emergency] Temperature or Humidity Exceeded Limits! Temp: %.2f, Humidity: %d%%\r\n", sensor_data.temper, sensor_data.humidity);
-        }
-        else if (ShoppingState == SHOP_STATE_EMMERGENCY)
-        {
-            // 恢复正常状态
-            BEEP(OFF);
-            LED_RED(OFF);
-            Shop_transtate(SHOP_STATE_IDLE);
-            Slave_transtate(SYS_STATE_IDLE); // 从机状态回到空闲
-            control_Servo_Door(0);           // 关闭舵机门
-            printf("[Recovery] Temperature and Humidity Back to Normal. Temp: %.2f, Humidity: %d%%\r\n", sensor_data.temper, sensor_data.humidity);
-        }
-          **/
+        // if (sensor_data.temper > MAX_TEMPER || (sensor_data.humidity > MAX_HUMIDITY && sensor_data.humidity < 100))
+        // {
+        //     // 进入紧急状态
+        //     Shop_transtate(SHOP_STATE_EMMERGENCY);
+        //     Slave_transtate(SYS_STATE_IDLE); // 从机状态回到空闲
+        //     printf("[Emergency] Temperature or Humidity Exceeded Limits! Temp: %.2f, Humidity: %d%%\r\n", sensor_data.temper, sensor_data.humidity);
+        // }
+        // else if (ShoppingState == SHOP_STATE_EMMERGENCY)
+        // {
+        //     // 恢复正常状态
+        //     BEEP(OFF);
+        //     LED_RED(OFF);
+        //     Shop_transtate(SHOP_STATE_IDLE);
+        //     Slave_transtate(SYS_STATE_IDLE); // 从机状态回到空闲
+        //     control_Servo_Door(0);           // 关闭舵机门
+        //     printf("[Recovery] Temperature and Humidity Back to Normal. Temp: %.2f, Humidity: %d%%\r\n", sensor_data.temper, sensor_data.humidity);
+        // }
         // 进入上位机服务函数，检查环形队列是否有更新
         callSyncHandler();
 
@@ -93,10 +92,10 @@ int main(void)
         case SHOP_STATE_WAITING_PAYOFF:
         {
             // 非阻塞：等待按键确认，超过 30s 自动返回扫码
-            if (Key_Scan(KEY2_GPIO_PORT, KEY2_GPIO_PIN) == KEY_OFF)
+            if (Key_Scan(KEY2_GPIO_PORT, KEY2_GPIO_PIN) == KEY_ON)
             {
                 printf("[Shop] Payment Confirmed. Switching to IDLE state.\r\n");
-                printf("CMD:PAY_OFF,TOTAL:%d\n", total_products2paid);
+                printf("CMD:PAY_OFF,TOTAL:%.2f\n", total_price);
                 control_Servo_Door(1);
                 delay_ms(800); // 等待舵机动作完成
                 control_Servo_Door(0);
@@ -383,6 +382,7 @@ void TIM2_IRQHandler(void)
         sensor_data.humidity = DHT11_GetHumidity();
 
         printf("[Sensor] Temperature: %.2f C, Humidity: %d %%\r\n", sensor_data.temper, sensor_data.humidity);
+        printf("[State] Current Shopping State: %s\r\n", ShoppingState_name[ShoppingState]);
     }
 }
 
