@@ -35,6 +35,24 @@ static void Get_Value_By_Key(const char *line, const char *key, char *out_val, u
     }
 }
 
+static uint8_t Parse_U64_Dec(const char *s, uint64_t *out_val)
+{
+    if (s == NULL || *s == '\0')
+    {
+        return 0;
+    }
+
+    char *endptr = NULL;
+    unsigned long long v = strtoull(s, &endptr, 10);
+    if (endptr == s || *endptr != '\0')
+    {
+        return 0;
+    }
+
+    *out_val = (uint64_t)v;
+    return 1;
+}
+
 // --- 主循环调用的解析函数 ---
 uint8_t Protocol_Parse_Line(ParsedPacket_t *out_packet) {
     // 从 RingBuffer 取数据，尝试拼凑一行
@@ -60,12 +78,12 @@ uint8_t Protocol_Parse_Line(ParsedPacket_t *out_packet) {
                 out_packet->event = EVENT_SYNC_DATA;
                 
                 Get_Value_By_Key(g_protocol.line_buf, "ID", temp_val, 32);
-                out_packet->id = atoi(temp_val);
+                out_packet->id_valid = Parse_U64_Dec(temp_val, &out_packet->id);
                 
                 Get_Value_By_Key(g_protocol.line_buf, "PR", temp_val, 32);
                 out_packet->price = atof(temp_val);
                 
-                Get_Value_By_Key(g_protocol.line_buf, "NM", out_packet->name, 50);
+                Get_Value_By_Key(g_protocol.line_buf, "NM", out_packet->name, sizeof(out_packet->name));
                 return 1;
             }
             // 3. 识别 END
@@ -79,7 +97,7 @@ uint8_t Protocol_Parse_Line(ParsedPacket_t *out_packet) {
             else if (strstr(g_protocol.line_buf, "CMD:SCAN")) {
                 out_packet->event = EVENT_SCAN;
                 Get_Value_By_Key(g_protocol.line_buf, "ID", temp_val, 32);
-                out_packet->id = atoi(temp_val);
+                out_packet->id_valid = Parse_U64_Dec(temp_val, &out_packet->id);
                 return 1;
             }
         } 

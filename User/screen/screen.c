@@ -25,10 +25,11 @@ void Screen_Shopping_System_Init(void)
 {
     // 初始化环形缓冲区
     initRingBuff();
-    
-    // 初始化调试串口 (波特率 115200)
-    uart1_init(115200);
-    
+
+    // 注意：不要在这里初始化/重配 USART1。
+    // 项目中 USART1 已被协议/调试串口使用（`USART_Config` + `USART1_IRQHandler`）。
+    // 这里再次 `uart1_init()` 会 `USART_DeInit(USART1)` 并重配中断，易导致协议接收异常/主循环看似“卡死”。
+
     // 初始化串口屏串口 (通常串口屏默认波特率是 9600 或 115200，这里假设 9600)
     // 根据实际屏幕配置修改波特率
     uart2_init(115200); 
@@ -100,7 +101,7 @@ void Screen_Calculate_And_Send_Total(void)
         totalPrice += prices[i] * counts[i];
     }
     
-    // 发送总价，这里示例追加显示在 t1 中，也可以改为 t0.txt="..."
+    // 发送总价，这里示例追加显示在 t3中，也可以改为 t3.txt="..."
     TJCPrintf("t3.txt+=\"%.2f\"", totalPrice);
     
     // printf("Total Price Calculated: %.2f\r\n", totalPrice);
@@ -114,31 +115,20 @@ bool Screen_Wait_For_PayOff_Msg(void)
     
     // printf("Waiting for Pay Off (0x02)...\r\n");
     
-    while(1)
+    // 非阻塞轮询：没有数据就直接返回 false，避免把主循环卡死
+    if (getRingBuffLenght() > 0)
     {
-        // 检查缓冲区是否有数据
-        if (getRingBuffLenght() > 0)
+        data = read1BFromRingBuff(0);
+        deleteRingBuff(1);
+
+        if (data == 0x02)
         {
-            // 读取数据
-            data = read1BFromRingBuff(0);
-            deleteRingBuff(1); // 消费数据
-            
-            if (data == 0x02)
-            {
-                // printf("Pay Off (0x02) Received! Payment Success.\r\n");
-                return true; // 收到结账信号，退出循环
-            }
-            else if (data == 0x03)
-            {
-                // printf("Received 0x03, Continue Listening...\r\n");
-                // 继续循环，什么都不做
-            }
-            else
-            {
-                // 处理其他未知数据，或者忽略
-            }
+            return true;
         }
+        // 其他字节（包括 0x03 超时）在上层用超时机制处理，这里仅消费并忽略
     }
+
+    return false;
 }
 
 /*

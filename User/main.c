@@ -1,5 +1,9 @@
 #include "main.h"
 
+// TIM2 1Hz 节拍计数（用于非阻塞超时）
+static volatile uint32_t g_tim2_tick_s = 0;
+static uint32_t g_waiting_payoff_start_s = 0;
+
 /**
  * @brief  主函数中包含和串口有关的，切换状态机的高优先级任务，数据的更新在TIM中断中完成
  */
@@ -12,7 +16,7 @@ int main(void)
     Screen_Shopping_System_Init();
     delay_init();
     Key_GPIO_Config();
-    BEEP_GPIO_Config(); // 初始化蜂鸣器 GPIO
+    // BEEP_GPIO_Config(); // 初始化蜂鸣器 GPIO
     LED_GPIO_Config();
 
     // 2. 中间件与协议初始化
@@ -25,12 +29,12 @@ int main(void)
     BEEP(OFF);
     LED_RED(OFF);
 
-    while (DHT11_Init())
+    /**while (DHT11_Init())
     {
         printf("[System] DHT11_Init ing...\r\n");
     } // 初始化 DHT11 湿度传感器
     delay_ms(50); // 等待传感器稳定
-
+    **/
     DS18B20_Init();
     printf("[System] DS18B20_Init Complete.\r\n");
     delay_ms(50);
@@ -38,7 +42,7 @@ int main(void)
     // ---------------------------------------------------------
     while (1)
     {
-        if (sensor_data.temper > MAX_TEMPER || (sensor_data.humidity > MAX_HUMIDITY && sensor_data.humidity < 100))
+        /**if (sensor_data.temper > MAX_TEMPER || (sensor_data.humidity > MAX_HUMIDITY && sensor_data.humidity < 100))
         {
             // 进入紧急状态
             Shop_transtate(SHOP_STATE_EMMERGENCY);
@@ -55,7 +59,7 @@ int main(void)
             control_Servo_Door(0);           // 关闭舵机门
             printf("[Recovery] Temperature and Humidity Back to Normal. Temp: %.2f, Humidity: %d%%\r\n", sensor_data.temper, sensor_data.humidity);
         }
-
+          **/
         // 进入上位机服务函数，检查环形队列是否有更新
         callSyncHandler();
 
@@ -63,7 +67,8 @@ int main(void)
         {
         case SHOP_STATE_IDLE:
             // 空闲状态，等待扫码
-            clear_shopping_car();
+            // clear_shopping_car();
+            // printf("clear_shopping_car...\r\n");
             if (Screen_Check_Start_Shopping_Msg())
             {
                 printf("[Shop] Shopping Started.\r\n");
@@ -76,16 +81,19 @@ int main(void)
 
             break;
         case SHOP_STATE_SCANNING:
-            refresh_MCU_products_list();
-            Screen_Update_HMI_Shopping_List();
-            Screen_Calculate_And_Send_Total();
-
+        {
+            // 非阻塞：保持主循环继续运行（允许 `callSyncHandler()` 处理扫码/同步协议）
             if (Screen_Wait_For_PayOff_Msg())
+            {
+                g_waiting_payoff_start_s = g_tim2_tick_s;
                 Shop_transtate(SHOP_STATE_WAITING_PAYOFF);
+            }
             break;
+        }
         case SHOP_STATE_WAITING_PAYOFF:
-            // 扫按钮，等了很久还没有付款就返回SHOP_STATE_SCANNING
-            if (Key_Scan(KEY2_GPIO_PORT, KEY2_GPIO_PIN) == KEY_ON)
+        {
+            // 非阻塞：等待按键确认，超过 30s 自动返回扫码
+            if (Key_Scan(KEY2_GPIO_PORT, KEY2_GPIO_PIN) == KEY_OFF)
             {
                 printf("[Shop] Payment Confirmed. Switching to IDLE state.\r\n");
                 printf("CMD:PAY_OFF,TOTAL:%d\n", total_products2paid);
@@ -93,11 +101,22 @@ int main(void)
                 delay_ms(800); // 等待舵机动作完成
                 control_Servo_Door(0);
                 Shop_transtate(SHOP_STATE_IDLE);
+                clear_shopping_car();
+                TJCPrintf("t4.txt=\"shopping finished\r\n\"");
+            }
+            else
+            {
+                if ((uint32_t)(g_tim2_tick_s - g_waiting_payoff_start_s) >= 30U)
+                {
+                    Shop_transtate(SHOP_STATE_SCANNING);
+                    TJCPrintf("t4.txt=\"shopping out-time\r\n\"");
+                }
             }
             break;
+        }
         case SHOP_STATE_EMMERGENCY:
             // 紧急状态，闪灯，响蜂鸣器
-            callEmergencyHandler();
+            // callEmergencyHandler();
             break;
         case SHOP_STATE_SYNCING:
             // 数据同步中，暂停模块通信
@@ -160,6 +179,11 @@ void callSyncHandler(void)
         case EVENT_SYNC_DATA:
             if (SlaveState == SYS_STATE_SYNC_ING)
             {
+                if (!rx_packet.id_valid)
+                {
+                    printf("CMD:ALARM,LEVEL:2,MSG:Invalid_ID\n");
+                    break;
+                }
                 // [核心操作] 写入 Flash
                 // 使用 sync_received_cnt 作为存储索引 (Index)
                 Product_Write_Item(sync_received_cnt,
@@ -216,6 +240,11 @@ void callSyncHandler(void)
         case EVENT_SCAN:
             if (SlaveState == SYS_STATE_IDLE)
             {
+                if (!rx_packet.id_valid)
+                {
+                    printf("CMD:ALARM,LEVEL:2,MSG:Invalid_ID\n");
+                    break;
+                }
                 Product_Item_t result_item;
                 // printf("[Scan] Searching ID: %d ...\r\n", rx_packet.id);
 
@@ -224,10 +253,18 @@ void callSyncHandler(void)
                 {
                     // 找到商品 -> 上报销售信息
                     // 格式: CMD:REPORT,ID:xxx,PR:xxx,NM:xxx
-                    printf("CMD:REPORT,ID:%d,PR:%.2f,NM:%s\n",
-                           result_item.id, result_item.price, result_item.name);
+                    printf("CMD:REPORT,ID:%llu,PR:%.2f,NM:%s\n",
+                           (unsigned long long)result_item.id,
+                           result_item.price,
+                           result_item.name);
                     // 同时添加到购物车
-                    add_product_to_shopping_car(result_item.id);
+                    add_product_to_shopping_car(&result_item);
+                    // 调试：打印购物车情况
+                    debug_print_shopping_car();
+
+                    refresh_MCU_products_list();
+                    Screen_Update_HMI_Shopping_List();
+                    Screen_Calculate_And_Send_Total();
                 }
                 else
                 {
@@ -331,10 +368,12 @@ void TIM2_IRQHandler(void)
         // 清除中断标志位
         TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
 
+        // 1Hz 节拍（用于主循环非阻塞超时）
+        g_tim2_tick_s++;
+
         // 如果当前处于数据同步状态，则跳过传感器更新
         if (ShoppingState == SHOP_STATE_SYNCING)
         {
-            printf("[TIM2] Syncing in progress, skipping sensor update.\r\n");
             return;
         }
 

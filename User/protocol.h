@@ -5,17 +5,20 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 
 // ==========================================
 // 1. Flash 存储结构定义 (定长 64字节)
 // ==========================================
 // 256字节(一页) / 64 = 4，完美对齐，无跨页写入风险
 typedef struct {
-    uint32_t id;          // 商品条码 (数字型)
+    uint64_t id;          // 商品条码 (支持 EAN-13 等 13 位条码)
     float    price;       // 价格
-    char     name[52];    // 商品名称 (UTF-8, 保留足够长度)
+    char     name[48];    // 商品名称 (UTF-8)
     uint32_t magic;       // 有效标志位 (0xA5A5A5A5)
 } Product_Flash_Store_t;
+
+typedef char Product_Flash_Store_t_size_must_be_64_bytes[(sizeof(Product_Flash_Store_t) == 64) ? 1 : -1];
 
 // Flash 地址规划
 #define FLASH_SECTOR_METADATA   0x000000  // 扇区0: 存放元数据(总数等)
@@ -41,9 +44,10 @@ typedef enum {
 typedef struct {
     ProtocolEvent_t event;
     uint32_t total_count;   // 对应 TOTAL/SUM
-    uint32_t id;            // 对应 ID
+    uint64_t id;            // 对应 ID
+    uint8_t id_valid;       // 1=ID解析成功(纯数字且未溢出), 0=无效
     float price;            // 对应 PR
-    char name[52];          // 对应 NM
+    char name[48];          // 对应 NM
 } ParsedPacket_t;
 
 // 协议管理器句柄

@@ -45,3 +45,4 @@
 ..\..\main.o: ..\..\User\./screen/screen.h
 ..\..\main.o: ..\..\User\./screen/tjc_usart_hmi.h
 ..\..\main.o: ..\..\User\./DHT11/DHT11.h
+..\..\main.o: ..\..\User\./Key/bsp_key.h

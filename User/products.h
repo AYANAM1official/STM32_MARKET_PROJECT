@@ -4,6 +4,7 @@
 #include "stm32f10x.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 
 // ==========================================
 // 1. 配置与内存映射
@@ -36,11 +37,13 @@ typedef struct {
 // 商品存储结构 (定长 64 字节)
 // 必须定长，以便通过 index 直接计算地址
 typedef struct {
-    uint32_t id;          // 条码 (Key)
+    uint64_t id;          // 条码 (Key) - 支持 13 位条码
     float    price;       // 价格
-    char     name[52];    // 名称 (UTF-8)
+    char     name[48];    // 名称 (UTF-8)
     uint32_t magic;       // 有效标记
 } Product_Item_t;
+
+typedef char Product_Item_t_size_must_be_64_bytes[(sizeof(Product_Item_t) == 64) ? 1 : -1];
 
 // 获取单个商品占用的 Flash 字节数
 #define ITEM_SIZE  sizeof(Product_Item_t)
@@ -58,13 +61,13 @@ void Product_Update_Metadata(uint32_t count);// 更新商品总数
 
 /* 写操作 */
 // 将商品写入指定索引位置
-void Product_Write_Item(uint32_t index, uint32_t id, float price, char* name);
+void Product_Write_Item(uint32_t index, uint64_t id, float price, char* name);
 
 /* 读/查操作 */
 // 根据索引读取 (用于遍历)
 uint8_t Product_Read_ByIndex(uint32_t index, Product_Item_t *out_item);
 // 根据 ID 查找 (用于扫码) - 核心功能
-uint8_t Product_Find_By_ID(uint32_t target_id, Product_Item_t *out_item);
+uint8_t Product_Find_By_ID(uint64_t target_id, Product_Item_t *out_item);
 
 void Product_Get_All_Info(Product_Item_t* list, int totalItems);
 

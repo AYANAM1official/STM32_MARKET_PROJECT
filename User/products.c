@@ -78,7 +78,7 @@ void Product_Update_Metadata(uint32_t count)
  * @brief  写入单个商品
  * @param  index: 存储序号 (0, 1, 2...)
  */
-void Product_Write_Item(uint32_t index, uint32_t id, float price, char *name)
+void Product_Write_Item(uint32_t index, uint64_t id, float price, char *name)
 {
     Product_Item_t item;
 
@@ -122,7 +122,7 @@ uint8_t Product_Read_ByIndex(uint32_t index, Product_Item_t *out_item)
  * 优化思路：在 RAM 中建立索引表 (ID -> Address)。
  * @return 1=找到, 0=未找到
  */
-uint8_t Product_Find_By_ID(uint32_t target_id, Product_Item_t *out_item)
+uint8_t Product_Find_By_ID(uint64_t target_id, Product_Item_t *out_item)
 {
     uint32_t i;
 
@@ -138,8 +138,8 @@ uint8_t Product_Find_By_ID(uint32_t target_id, Product_Item_t *out_item)
 
         // 优化：先只读前 4 个字节 (ID)，如果匹配再读剩下的
         // 这样比每次读 64 字节快很多
-        uint32_t read_id;
-        SPI_FLASH_BufferRead((uint8_t *)&read_id, addr, 4);
+        uint64_t read_id;
+        SPI_FLASH_BufferRead((uint8_t *)&read_id, addr, 8);
 
         if (read_id == target_id)
         {
@@ -195,7 +195,11 @@ void Product_Debug_Dump_All(void)
     {
         if (Product_Read_ByIndex(i, &item))
         {
-            printf("[%d] ID:%d, Price:%.2f, Name:%s\r\n", i, item.id, item.price, item.name);
+            printf("[%d] ID:%llu, Price:%.2f, Name:%s\r\n",
+                   i,
+                   (unsigned long long)item.id,
+                   item.price,
+                   item.name);
         }
         else
         {
